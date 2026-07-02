@@ -309,6 +309,21 @@ func handleGetDeviceParam(session *server.Session, iden string, raw json.RawMess
 					"value_min":  -100,
 					"value_max":  100,
 				},
+				{
+					"name":       "scan-mode",
+					"value_type": "string",
+					"value":      "simplex",
+					"range_type": "list",
+					"value_list": []string{"simplex", "duplex"},
+				},
+				{
+					"name":       "scan-count",
+					"value_type": "int",
+					"value":      0,
+					"range_type": "min_max",
+					"value_min":  0,
+					"value_max":  9999,
+				},
 			},
 		},
 		{
@@ -344,6 +359,17 @@ func handleGetDeviceParam(session *server.Session, iden string, raw json.RawMess
 			name := param["name"].(string)
 			if v, ok := userParams[name]; ok {
 				param["value"] = v
+			} else {
+				// 额外支持下划线与中划线兼容合并
+				if name == "scan-mode" {
+					if vAlt, okAlt := userParams["scan_mode"]; okAlt {
+						param["value"] = vAlt
+					}
+				} else if name == "scan-count" {
+					if vAlt, okAlt := userParams["scan_count"]; okAlt {
+						param["value"] = vAlt
+					}
+				}
 			}
 		}
 	}

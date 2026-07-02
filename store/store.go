@@ -80,13 +80,14 @@ type Store struct {
 	GlobalCfg GlobalConfig
 
 	// 设备状态
-	deviceState  DeviceState
-	currDevice   string // 当前打开的设备名
-	deviceParams map[string]interface{}
+	deviceState     DeviceState
+	currDevice      string // 当前打开的设备名
+	deviceParams    map[string]interface{}
+	scanImageOffset int // 当前待扫描正面图片的索引偏移量
 
 	// 批号管理
-	batches    map[string]*Batch
-	currBatch  string // 当前批号 ID
+	batches   map[string]*Batch
+	currBatch string // 当前批号 ID
 
 	// 受保护的文件列表（仅允许删除本项目生成的文件）
 	protectedFiles map[string]bool
@@ -106,11 +107,12 @@ func New(cfg *config.Config) *Store {
 			ImageTiffJpegQuality: 80,
 			ImageJp2Ratio:        10.0,
 		},
-		deviceState:    StateUninitialized,
-		deviceParams:   make(map[string]interface{}),
-		batches:        make(map[string]*Batch),
-		currBatch:      "",
-		protectedFiles: make(map[string]bool),
+		deviceState:     StateUninitialized,
+		deviceParams:    make(map[string]interface{}),
+		batches:         make(map[string]*Batch),
+		currBatch:       "",
+		protectedFiles:  make(map[string]bool),
+		scanImageOffset: 0,
 	}
 
 	// 创建默认批号
@@ -152,6 +154,7 @@ func (s *Store) SetCurrDevice(name string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.currDevice = name
+	s.scanImageOffset = 0 // 重置偏移量
 }
 
 // GetDeviceParams 获取设备参数
@@ -179,6 +182,89 @@ func (s *Store) ResetDeviceParams() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.deviceParams = make(map[string]interface{})
+	s.scanImageOffset = 0 // 重置偏移量
+}
+
+// GetScanImageOffset 获取当前扫描的图片偏移量
+func (s *Store) GetScanImageOffset() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.scanImageOffset
+}
+
+// SetScanImageOffset 设置当前扫描的图片偏移量
+func (s *Store) SetScanImageOffset(offset int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.scanImageOffset = offset
+}
+
+// GetScanMode 获取当前 scan-mode（兼容 scan_mode）
+func (s *Store) GetScanMode() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var modeVal interface{}
+	var ok bool
+	if modeVal, ok = s.deviceParams["scan-mode"]; !ok {
+		if modeVal, ok = s.deviceParams["scan_mode"]; !ok {
+			return "simplex"
+		}
+	}
+
+	switch val := modeVal.(type) {
+	case string:
+		if val == "1" {
+			return "duplex"
+		}
+		if val == "0" {
+			return "simplex"
+		}
+		return val
+	case int:
+		if val == 1 {
+			return "duplex"
+		}
+		return "simplex"
+	case float64:
+		if int(val) == 1 {
+			return "duplex"
+		}
+		return "simplex"
+	default:
+		return "simplex"
+	}
+}
+
+// GetScanCount 获取当前 scan-count（兼容 scan_count）
+func (s *Store) GetScanCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var countVal interface{}
+	var ok bool
+	if countVal, ok = s.deviceParams["scan-count"]; !ok {
+		if countVal, ok = s.deviceParams["scan_count"]; !ok {
+			return 0
+		}
+	}
+
+	switch val := countVal.(type) {
+	case int:
+		return val
+	case float64:
+		return int(val)
+	case int64:
+		return int(val)
+	case string:
+		var i int
+		if _, err := fmt.Sscanf(val, "%d", &i); err == nil {
+			return i
+		}
+		return 0
+	default:
+		return 0
+	}
 }
 
 // ─── 全局配置操作 ───

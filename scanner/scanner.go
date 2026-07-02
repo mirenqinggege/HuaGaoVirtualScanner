@@ -125,16 +125,74 @@ func (vs *VirtualScanner) doScan(session Session, iden string, params ScanParams
 		return
 	}
 
-	log.Printf("📷 找到 %d 张图片，开始模拟扫描...", len(imageFiles))
+	// 分离正面图和建立背面图的快速查找 map
+	var frontFiles []string
+	backFilesMap := make(map[string]string)
+	for _, imgFile := range imageFiles {
+		base := filepath.Base(imgFile)
+		ext := filepath.Ext(base)
+		nameWithoutExt := strings.TrimSuffix(base, ext)
+
+		nameLower := strings.ToLower(nameWithoutExt)
+		if strings.HasSuffix(nameLower, "_back") {
+			// 背面图
+			frontKey := nameWithoutExt[:len(nameWithoutExt)-5]
+			backFilesMap[strings.ToLower(frontKey)] = imgFile
+		} else {
+			// 正面图
+			frontFiles = append(frontFiles, imgFile)
+		}
+	}
+
+	if len(frontFiles) == 0 {
+		log.Printf("⚠️ 图片目录 %s 中没有找到任何正面图片文件 (不含 _back)", imageDir)
+		session.SendEvent("scan_info", iden, map[string]interface{}{
+			"is_error": false,
+			"info":     fmt.Sprintf("图片目录 %s 中没有正面图片", imageDir),
+		})
+		session.SendEvent("scan_end", iden, nil)
+		return
+	}
+
+	// 读取参数
+	scanMode := vs.store.GetScanMode()
+	scanCount := vs.store.GetScanCount()
+	scanDelay := time.Duration(vs.store.Cfg.ScanDelay) * time.Millisecond
+	saveDir := vs.store.Cfg.SaveDir
+
+	// 延续指针
+	startOffset := vs.store.GetScanImageOffset()
+	if startOffset < 0 || startOffset >= len(frontFiles) {
+		startOffset = 0
+	}
+
+	log.Printf("📷 找到 %d 张正面物理纸张，当前偏移量为 %d，开始模拟扫描 (Mode: %s, Count: %d)...", len(frontFiles), startOffset, scanMode, scanCount)
 
 	// 发送 scan_begin 事件
 	session.SendEvent("scan_begin", iden, nil)
 
-	// 逐个扫描图片
-	scanDelay := time.Duration(vs.store.Cfg.ScanDelay) * time.Millisecond
-	saveDir := vs.store.Cfg.SaveDir
+	scannedSheets := 0
+	currIdx := startOffset
+	finalOffset := startOffset
 
-	for i, imgFile := range imageFiles {
+	for {
+		// 检查退出条件（进纸数达到限制）
+		if scanCount > 0 && scannedSheets >= scanCount {
+			log.Printf("⏹️ 达到请求的扫描纸张数上限 (%d 张)，结束扫描", scanCount)
+			break
+		}
+
+		// 检查物理图片是否全部扫完且未启用循环模式
+		if scannedSheets >= len(frontFiles) && !vs.store.Cfg.ScanLoop {
+			log.Println("ℹ️ 已扫完全部物理纸张，进纸槽已空")
+			break
+		}
+
+		// 取出当前的正面图
+		imgIndex := currIdx % len(frontFiles)
+		imgFile := frontFiles[imgIndex]
+
+		// 1. 扫描正面
 		select {
 		case <-ctx.Done():
 			log.Println("🛑 扫描被中断")
@@ -143,60 +201,52 @@ func (vs *VirtualScanner) doScan(session Session, iden string, params ScanParams
 				"info":     "扫描被用户中断",
 			})
 			session.SendEvent("scan_end", iden, nil)
+			vs.store.SetScanImageOffset(imgIndex)
 			return
 		default:
 		}
 
-		// 读取图片数据
-		data, err := os.ReadFile(imgFile)
-		if err != nil {
-			log.Printf("⚠️ 读取图片 %s 失败: %v", imgFile, err)
-			session.SendEvent("scan_info", iden, map[string]interface{}{
-				"is_error": true,
-				"info":     fmt.Sprintf("读取图片失败: %s", filepath.Base(imgFile)),
-			})
-			continue
+		// 执行正面图扫描并发送
+		if err := vs.scanSingleImageFile(session, iden, imgFile, saveDir, params, false); err != nil {
+			log.Printf("⚠️ 扫描正面 %s 失败: %v", imgFile, err)
 		}
 
-		// 检测格式
-		format := detectFormat(imgFile)
+		// 2. 扫描背面 (如果是 duplex 模式)
+		if scanMode == "duplex" {
+			base := filepath.Base(imgFile)
+			ext := filepath.Ext(base)
+			nameWithoutExt := strings.TrimSuffix(base, ext)
 
-		// 构建 scan_image 事件数据
-		eventData := map[string]interface{}{
-			"is_blank": false,
-		}
-
-		// 如果 local_save 为 true，保存到目录
-		if params.LocalSave {
-			savePath := filepath.Join(saveDir, filepath.Base(imgFile))
-			if err := os.MkdirAll(saveDir, 0755); err == nil {
-				if err := os.WriteFile(savePath, data, 0644); err == nil {
-					eventData["image_path"] = savePath
-					vs.store.MarkFileProtected(savePath)
+			// 查找对应的背面图
+			backFile, hasBack := backFilesMap[strings.ToLower(nameWithoutExt)]
+			if hasBack {
+				select {
+				case <-ctx.Done():
+					log.Println("🛑 扫描被中断")
+					session.SendEvent("scan_info", iden, map[string]interface{}{
+						"is_error": false,
+						"info":     "扫描被用户中断",
+					})
+					session.SendEvent("scan_end", iden, nil)
+					vs.store.SetScanImageOffset(imgIndex)
+					return
+				case <-time.After(50 * time.Millisecond): // 极小间隔
 				}
+
+				if err := vs.scanSingleImageFile(session, iden, backFile, saveDir, params, true); err != nil {
+					log.Printf("⚠️ 扫描背面 %s 失败: %v", backFile, err)
+				}
+			} else {
+				log.Printf("ℹ️ 未找到 %s 对应的背面图，跳过背面扫描", imgFile)
 			}
 		}
 
-		// 如果 get_base64 为 true，附带 base64 数据
-		if params.GetBase64 {
-			eventData["image_base64"] = encodeBase64(data)
-		}
+		// 3. 本张纸扫描完毕，增加计数
+		scannedSheets++
+		currIdx++
+		finalOffset = currIdx % len(frontFiles)
 
-		// 发送 scan_image 事件
-		session.SendEvent("scan_image", iden, eventData)
-
-		// 将图片添加到当前批号的图像列表（仅使用原始数据）
-		vs.store.AddImage(&store.ImageRecord{
-			FilePath: imgFile,
-			Data:     data,
-			Format:   format,
-		})
-
-		if vs.store.Cfg.Verbose {
-			log.Printf("  📄 [%d/%d] %s", i+1, len(imageFiles), filepath.Base(imgFile))
-		}
-
-		// 模拟扫描延迟
+		// 模拟扫描下一张纸的进纸延迟
 		select {
 		case <-ctx.Done():
 			log.Println("🛑 扫描被中断")
@@ -205,18 +255,85 @@ func (vs *VirtualScanner) doScan(session Session, iden string, params ScanParams
 				"info":     "扫描被用户中断",
 			})
 			session.SendEvent("scan_end", iden, nil)
+			vs.store.SetScanImageOffset(finalOffset)
 			return
 		case <-time.After(scanDelay):
 		}
 	}
+
+	// 保存更新后的物理纸张偏移指针
+	vs.store.SetScanImageOffset(finalOffset)
 
 	// 如果指定了 save_path_name，处理多页文件保存
 	if params.SavePathName != "" {
 		vs.saveMultiPageIfNeeded(session, iden, params.SavePathName)
 	}
 
-	log.Printf("✅ 扫描完成，共 %d 张图片", len(imageFiles))
+	log.Printf("✅ 扫描完成，共处理了 %d 张物理纸张", scannedSheets)
 	session.SendEvent("scan_end", iden, nil)
+}
+
+// scanSingleImageFile 扫描并发送单张图片文件
+func (vs *VirtualScanner) scanSingleImageFile(session Session, iden string, imgFile string, saveDir string, params ScanParams, isBack bool) error {
+	data, err := os.ReadFile(imgFile)
+	if err != nil {
+		session.SendEvent("scan_info", iden, map[string]interface{}{
+			"is_error": true,
+			"info":     fmt.Sprintf("读取图片失败: %s", filepath.Base(imgFile)),
+		})
+		return err
+	}
+
+	format := detectFormat(imgFile)
+
+	eventData := map[string]interface{}{
+		"is_blank": false,
+	}
+
+	// 如果 local_save 为 true，保存到目录
+	if params.LocalSave {
+		baseName := filepath.Base(imgFile)
+		if isBack {
+			ext := filepath.Ext(baseName)
+			nameWithoutExt := strings.TrimSuffix(baseName, ext)
+			if !strings.HasSuffix(strings.ToLower(nameWithoutExt), "_back") {
+				baseName = nameWithoutExt + "_back" + ext
+			}
+		}
+
+		savePath := filepath.Join(saveDir, baseName)
+		if err := os.MkdirAll(saveDir, 0755); err == nil {
+			if err := os.WriteFile(savePath, data, 0644); err == nil {
+				eventData["image_path"] = savePath
+				vs.store.MarkFileProtected(savePath)
+			}
+		}
+	}
+
+	// 如果 get_base64 为 true，附带 base64 数据
+	if params.GetBase64 {
+		eventData["image_base64"] = encodeBase64(data)
+	}
+
+	// 发送 scan_image 事件
+	session.SendEvent("scan_image", iden, eventData)
+
+	// 将图片添加到当前批号的图像列表（仅使用原始数据）
+	vs.store.AddImage(&store.ImageRecord{
+		FilePath: imgFile,
+		Data:     data,
+		Format:   format,
+	})
+
+	if vs.store.Cfg.Verbose {
+		side := "Front"
+		if isBack {
+			side = "Back"
+		}
+		log.Printf("  📄 [%s] %s", side, filepath.Base(imgFile))
+	}
+
+	return nil
 }
 
 // saveMultiPageIfNeeded 如果需要，保存为多页文件
