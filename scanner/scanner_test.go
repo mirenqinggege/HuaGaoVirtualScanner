@@ -12,6 +12,7 @@ import (
 type MockSession struct {
 	Events      []string
 	ImageEvents []map[string]interface{}
+	InfoEvents  []map[string]interface{}
 }
 
 func (m *MockSession) SendOK(funcName, iden string, extra map[string]interface{}) {}
@@ -21,6 +22,9 @@ func (m *MockSession) SendEvent(funcName, iden string, extra map[string]interfac
 	if funcName == "scan_image" {
 		m.ImageEvents = append(m.ImageEvents, extra)
 	}
+	if funcName == "scan_info" {
+		m.InfoEvents = append(m.InfoEvents, extra)
+	}
 }
 func (m *MockSession) SendMessage(msg interface{}) error { return nil }
 
@@ -29,25 +33,56 @@ func TestStoreScanParams(t *testing.T) {
 	cfg := config.DefaultConfig()
 	st := store.New(cfg)
 
-	// 1. 测试 scan-mode (中下划线、数字、字符串兼容性)
-	st.SetDeviceParams(map[string]interface{}{"scan-mode": "duplex"})
-	if st.GetScanMode() != "duplex" {
-		t.Errorf("expected duplex, got %s", st.GetScanMode())
+	// 1. 测试 page (单双面兼容性)
+	st.SetDeviceParams(map[string]interface{}{"page": "双面"})
+	if st.GetPageMode() != "duplex" {
+		t.Errorf("expected duplex, got %s", st.GetPageMode())
+	}
+
+	st.ResetDeviceParams()
+	st.SetDeviceParams(map[string]interface{}{"page": "对折"})
+	if st.GetPageMode() != "duplex" {
+		t.Errorf("expected duplex, got %s", st.GetPageMode())
+	}
+
+	st.ResetDeviceParams()
+	st.SetDeviceParams(map[string]interface{}{"page": 1})
+	if st.GetPageMode() != "duplex" {
+		t.Errorf("expected duplex, got %s", st.GetPageMode())
+	}
+
+	st.ResetDeviceParams()
+	st.SetDeviceParams(map[string]interface{}{"page": "单面"})
+	if st.GetPageMode() != "simplex" {
+		t.Errorf("expected simplex, got %s", st.GetPageMode())
+	}
+
+	// 2. 测试 scan-mode (中下划线、中文/英文、字符串/数字兼容性)
+	st.ResetDeviceParams()
+	st.SetDeviceParams(map[string]interface{}{"scan-mode": "扫描指定张数"})
+	if st.GetScanMode() != "specified" {
+		t.Errorf("expected specified, got %s", st.GetScanMode())
+	}
+
+	st.ResetDeviceParams()
+	st.SetDeviceParams(map[string]interface{}{"scan_mode": "连续扫描"})
+	if st.GetScanMode() != "continuous" {
+		t.Errorf("expected continuous, got %s", st.GetScanMode())
 	}
 
 	st.ResetDeviceParams()
 	st.SetDeviceParams(map[string]interface{}{"scan_mode": 1})
-	if st.GetScanMode() != "duplex" {
-		t.Errorf("expected duplex, got %s", st.GetScanMode())
+	if st.GetScanMode() != "specified" {
+		t.Errorf("expected specified, got %s", st.GetScanMode())
 	}
 
 	st.ResetDeviceParams()
 	st.SetDeviceParams(map[string]interface{}{"scan_mode": "0"})
-	if st.GetScanMode() != "simplex" {
-		t.Errorf("expected simplex, got %s", st.GetScanMode())
+	if st.GetScanMode() != "continuous" {
+		t.Errorf("expected continuous, got %s", st.GetScanMode())
 	}
 
-	// 2. 测试 scan-count (中下划线、字符串/数字转换)
+	// 3. 测试 scan-count (中下划线、字符串/数字转换)
 	st.ResetDeviceParams()
 	st.SetDeviceParams(map[string]interface{}{"scan-count": 5})
 	if st.GetScanCount() != 5 {
@@ -88,7 +123,10 @@ func TestSimplexAndDuplexScan(t *testing.T) {
 	vs := New(st)
 
 	// 1. 单面扫描测试 (simplex)
-	st.SetDeviceParams(map[string]interface{}{"scan-mode": "simplex", "scan-count": 0})
+	st.SetDeviceParams(map[string]interface{}{
+		"page":      "单面",
+		"scan-mode": "连续扫描",
+	})
 	session1 := &MockSession{}
 	vs.StartScan(session1, "test1", ScanParams{LocalSave: false, GetBase64: false})
 	
@@ -110,7 +148,10 @@ func TestSimplexAndDuplexScan(t *testing.T) {
 
 	// 2. 双面扫描测试 (duplex)
 	st.ResetDeviceParams()
-	st.SetDeviceParams(map[string]interface{}{"scan-mode": "duplex", "scan-count": 0})
+	st.SetDeviceParams(map[string]interface{}{
+		"page":      "双面",
+		"scan-mode": "连续扫描",
+	})
 	session2 := &MockSession{}
 	vs.StartScan(session2, "test2", ScanParams{LocalSave: false, GetBase64: false})
 
@@ -129,7 +170,7 @@ func TestSimplexAndDuplexScan(t *testing.T) {
 	}
 }
 
-// TestScanContinuationAndCountLimit 测试选项二的指针延续和进纸页数限制
+// TestScanContinuationAndCountLimit 测试指针延续和进纸页数限制
 func TestScanContinuationAndCountLimit(t *testing.T) {
 	tempDir := t.TempDir()
 	
@@ -146,9 +187,9 @@ func TestScanContinuationAndCountLimit(t *testing.T) {
 	vs := New(st)
 
 	// 限制只能扫 1 张物理纸张 (scan-count = 1)，双面模式 (duplex)
-	// 由于是方案 B（按物理进纸张数限制），应当扫完 001 的正面和背面，然后结束。
 	st.SetDeviceParams(map[string]interface{}{
-		"scan-mode":  "duplex",
+		"page":       "双面",
+		"scan-mode":  "扫描指定张数",
 		"scan-count": 1,
 	})
 
@@ -164,7 +205,7 @@ func TestScanContinuationAndCountLimit(t *testing.T) {
 			imageCount1++
 		}
 	}
-	// 方案B：扫完 1 张物理纸张的正面与背面，共 2 张图像
+	// 扫完 1 张物理纸张的正面与背面，共 2 张图像
 	if imageCount1 != 2 {
 		t.Errorf("expected 2 images for 1 duplex sheet, got %d", imageCount1)
 	}
@@ -194,5 +235,74 @@ func TestScanContinuationAndCountLimit(t *testing.T) {
 	// 确认偏移量更新为 2
 	if st.GetScanImageOffset() != 2 {
 		t.Errorf("expected offset to advance to 2, got %d", st.GetScanImageOffset())
+	}
+}
+
+// TestOutOfPaperErrorAndReset 测试无纸报错以及重置逻辑
+func TestOutOfPaperErrorAndReset(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// 准备 2 张物理纸张
+	_ = os.WriteFile(filepath.Join(tempDir, "001.jpg"), []byte("f1"), 0644)
+	_ = os.WriteFile(filepath.Join(tempDir, "002.jpg"), []byte("f2"), 0644)
+
+	cfg := config.DefaultConfig()
+	cfg.ImageDir = tempDir
+	cfg.ScanDelay = 1
+	st := store.New(cfg)
+	vs := New(st)
+
+	// 设置为扫描指定张数，每次限制扫描 1 张
+	st.SetDeviceParams(map[string]interface{}{
+		"page":       "单面",
+		"scan-mode":  "扫描指定张数",
+		"scan-count": 1,
+	})
+
+	// 第一次：扫完 001.jpg
+	session1 := &MockSession{}
+	vs.StartScan(session1, "s1", ScanParams{LocalSave: false, GetBase64: false})
+	for vs.IsScanning() {}
+	if st.GetScanImageOffset() != 1 {
+		t.Errorf("expected offset 1, got %d", st.GetScanImageOffset())
+	}
+
+	// 第二次：扫完 002.jpg
+	session2 := &MockSession{}
+	vs.StartScan(session2, "s2", ScanParams{LocalSave: false, GetBase64: false})
+	for vs.IsScanning() {}
+	if st.GetScanImageOffset() != 2 {
+		t.Errorf("expected offset 2, got %d", st.GetScanImageOffset())
+	}
+
+	// 第三次：此时已经没有物理纸张了，应该触发“无纸报错”
+	session3 := &MockSession{}
+	vs.StartScan(session3, "s3", ScanParams{LocalSave: false, GetBase64: false})
+	for vs.IsScanning() {}
+
+	// 验证是否触发了无纸报错，并且没有产生任何 scan_image
+	if len(session3.InfoEvents) == 0 {
+		t.Fatalf("expected scan_info event, got none")
+	}
+	isError := session3.InfoEvents[0]["is_error"].(bool)
+	infoStr := session3.InfoEvents[0]["info"].(string)
+	if !isError || infoStr != "no paper in adf" {
+		t.Errorf("expected 'no paper in adf' error, got is_error: %t, info: %s", isError, infoStr)
+	}
+
+	imageCount3 := 0
+	for _, ev := range session3.Events {
+		if ev == "scan_image" {
+			imageCount3++
+		}
+	}
+	if imageCount3 != 0 {
+		t.Errorf("expected 0 scanned images, got %d", imageCount3)
+	}
+
+	// 4. 重置设备，验证偏移量重新归零
+	st.SetCurrDevice("")
+	if st.GetScanImageOffset() != 0 {
+		t.Errorf("expected reset offset to 0, got %d", st.GetScanImageOffset())
 	}
 }

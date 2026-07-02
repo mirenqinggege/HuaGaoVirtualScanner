@@ -199,7 +199,50 @@ func (s *Store) SetScanImageOffset(offset int) {
 	s.scanImageOffset = offset
 }
 
-// GetScanMode 获取当前 scan-mode（兼容 scan_mode）
+// GetPageMode 获取当前单双面设置 page
+func (s *Store) GetPageMode() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var pageVal interface{}
+	var ok bool
+	if pageVal, ok = s.deviceParams["page"]; !ok {
+		// 兼容原本的 duplex 布尔字段
+		if dupVal, dupOk := s.deviceParams["duplex"]; dupOk {
+			if b, isBool := dupVal.(bool); isBool && b {
+				return "duplex"
+			}
+		}
+		return "simplex"
+	}
+
+	switch val := pageVal.(type) {
+	case string:
+		if val == "双面" || val == "对折" || val == "duplex" || val == "1" {
+			return "duplex"
+		}
+		return "simplex"
+	case int:
+		if val == 1 || val == 4 { // 1 代表双面，4 代表对折
+			return "duplex"
+		}
+		return "simplex"
+	case float64:
+		if int(val) == 1 || int(val) == 4 {
+			return "duplex"
+		}
+		return "simplex"
+	case bool:
+		if val {
+			return "duplex"
+		}
+		return "simplex"
+	default:
+		return "simplex"
+	}
+}
+
+// GetScanMode 获取当前 scan-mode（连续扫描还是指定张数）
 func (s *Store) GetScanMode() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -208,31 +251,28 @@ func (s *Store) GetScanMode() string {
 	var ok bool
 	if modeVal, ok = s.deviceParams["scan-mode"]; !ok {
 		if modeVal, ok = s.deviceParams["scan_mode"]; !ok {
-			return "simplex"
+			return "continuous"
 		}
 	}
 
 	switch val := modeVal.(type) {
 	case string:
-		if val == "1" {
-			return "duplex"
+		if val == "扫描指定张数" || val == "specified" || val == "count" || val == "1" {
+			return "specified"
 		}
-		if val == "0" {
-			return "simplex"
-		}
-		return val
+		return "continuous"
 	case int:
 		if val == 1 {
-			return "duplex"
+			return "specified"
 		}
-		return "simplex"
+		return "continuous"
 	case float64:
 		if int(val) == 1 {
-			return "duplex"
+			return "specified"
 		}
-		return "simplex"
+		return "continuous"
 	default:
-		return "simplex"
+		return "continuous"
 	}
 }
 

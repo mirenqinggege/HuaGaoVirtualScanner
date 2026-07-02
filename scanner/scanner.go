@@ -155,6 +155,7 @@ func (vs *VirtualScanner) doScan(session Session, iden string, params ScanParams
 	}
 
 	// 读取参数
+	pageMode := vs.store.GetPageMode()
 	scanMode := vs.store.GetScanMode()
 	scanCount := vs.store.GetScanCount()
 	scanDelay := time.Duration(vs.store.Cfg.ScanDelay) * time.Millisecond
@@ -162,11 +163,31 @@ func (vs *VirtualScanner) doScan(session Session, iden string, params ScanParams
 
 	// 延续指针
 	startOffset := vs.store.GetScanImageOffset()
-	if startOffset < 0 || startOffset >= len(frontFiles) {
+	if startOffset < 0 {
 		startOffset = 0
 	}
 
-	log.Printf("📷 找到 %d 张正面物理纸张，当前偏移量为 %d，开始模拟扫描 (Mode: %s, Count: %d)...", len(frontFiles), startOffset, scanMode, scanCount)
+	if vs.store.Cfg.ScanLoop {
+		// 循环模式下，自动对偏移指针取模重置
+		if len(frontFiles) > 0 {
+			startOffset = startOffset % len(frontFiles)
+		} else {
+			startOffset = 0
+		}
+	} else {
+		// 非循环模式下，如果当前偏移量大于或等于纸张总数，表明进纸器已无纸
+		if startOffset >= len(frontFiles) {
+			log.Printf("⚠️ 物理纸张已被全部扫完，进纸槽无纸 (当前偏移量: %d, 纸张总数: %d)", startOffset, len(frontFiles))
+			session.SendEvent("scan_info", iden, map[string]interface{}{
+				"is_error": true,
+				"info":     "no paper in adf",
+			})
+			session.SendEvent("scan_end", iden, nil)
+			return
+		}
+	}
+
+	log.Printf("📷 找到 %d 张正面物理纸张，当前偏移量为 %d，开始模拟扫描 (PageMode: %s, ScanMode: %s, Count: %d)...", len(frontFiles), startOffset, pageMode, scanMode, scanCount)
 
 	// 发送 scan_begin 事件
 	session.SendEvent("scan_begin", iden, nil)
@@ -176,14 +197,14 @@ func (vs *VirtualScanner) doScan(session Session, iden string, params ScanParams
 	finalOffset := startOffset
 
 	for {
-		// 检查退出条件（进纸数达到限制）
-		if scanCount > 0 && scannedSheets >= scanCount {
+		// 检查退出条件（进纸数达到限制，仅在指定张数扫描模式下生效）
+		if scanMode == "specified" && scanCount > 0 && scannedSheets >= scanCount {
 			log.Printf("⏹️ 达到请求的扫描纸张数上限 (%d 张)，结束扫描", scanCount)
 			break
 		}
 
 		// 检查物理图片是否全部扫完且未启用循环模式
-		if scannedSheets >= len(frontFiles) && !vs.store.Cfg.ScanLoop {
+		if currIdx >= len(frontFiles) && !vs.store.Cfg.ScanLoop {
 			log.Println("ℹ️ 已扫完全部物理纸张，进纸槽已空")
 			break
 		}
@@ -201,7 +222,7 @@ func (vs *VirtualScanner) doScan(session Session, iden string, params ScanParams
 				"info":     "扫描被用户中断",
 			})
 			session.SendEvent("scan_end", iden, nil)
-			vs.store.SetScanImageOffset(imgIndex)
+			vs.store.SetScanImageOffset(currIdx)
 			return
 		default:
 		}
@@ -211,8 +232,8 @@ func (vs *VirtualScanner) doScan(session Session, iden string, params ScanParams
 			log.Printf("⚠️ 扫描正面 %s 失败: %v", imgFile, err)
 		}
 
-		// 2. 扫描背面 (如果是 duplex 模式)
-		if scanMode == "duplex" {
+		// 2. 扫描背面 (如果为双面模式)
+		if pageMode == "duplex" {
 			base := filepath.Base(imgFile)
 			ext := filepath.Ext(base)
 			nameWithoutExt := strings.TrimSuffix(base, ext)
@@ -228,7 +249,7 @@ func (vs *VirtualScanner) doScan(session Session, iden string, params ScanParams
 						"info":     "扫描被用户中断",
 					})
 					session.SendEvent("scan_end", iden, nil)
-					vs.store.SetScanImageOffset(imgIndex)
+					vs.store.SetScanImageOffset(currIdx)
 					return
 				case <-time.After(50 * time.Millisecond): // 极小间隔
 				}
@@ -244,7 +265,7 @@ func (vs *VirtualScanner) doScan(session Session, iden string, params ScanParams
 		// 3. 本张纸扫描完毕，增加计数
 		scannedSheets++
 		currIdx++
-		finalOffset = currIdx % len(frontFiles)
+		finalOffset = currIdx
 
 		// 模拟扫描下一张纸的进纸延迟
 		select {

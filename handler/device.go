@@ -310,11 +310,18 @@ func handleGetDeviceParam(session *server.Session, iden string, raw json.RawMess
 					"value_max":  100,
 				},
 				{
+					"name":       "page",
+					"value_type": "string",
+					"value":      "单面",
+					"range_type": "list",
+					"value_list": []string{"单面", "双面", "跳过空白页（通用）", "跳过空白页（发票纸）", "对折"},
+				},
+				{
 					"name":       "scan-mode",
 					"value_type": "string",
-					"value":      "simplex",
+					"value":      "连续扫描",
 					"range_type": "list",
-					"value_list": []string{"simplex", "duplex"},
+					"value_list": []string{"连续扫描", "扫描指定张数"},
 				},
 				{
 					"name":       "scan-count",
